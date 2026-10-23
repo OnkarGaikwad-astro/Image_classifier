@@ -4,55 +4,92 @@
 import { useEffect, useRef, useState } from "react";
 import { predictDigit } from "./predict";
 
+type CameraMode = "user" | "environment";
+
 export default function Home() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
 
   const [cameraOn, setCameraOn] = useState(false);
+  const [facingMode, setFacingMode] = useState<CameraMode>("user");
+  const [switchingCamera, setSwitchingCamera] = useState(false);
   const [prediction, setPrediction] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
-  async function startCamera() {
+  async function startCamera(mode: CameraMode = facingMode) {
+    setError("");
+
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setError("Camera access is unavailable. Use localhost or HTTPS.");
+      return false;
+    }
+
+    // Stop the currently active camera before opening another one.
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    streamRef.current = null;
+
     try {
-      setError("");
-
-      if (!navigator.mediaDevices?.getUserMedia) {
-        throw new Error(
-          "Camera access is unavailable. Use localhost or HTTPS."
-        );
-      }
-
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: "user" },
+        video: {
+          facingMode: { ideal: mode },
+        },
         audio: false,
       });
-
-      streamRef.current = stream;
 
       const video = videoRef.current;
 
       if (!video) {
         stream.getTracks().forEach((track) => track.stop());
-        streamRef.current = null;
         throw new Error("Camera preview could not be initialized.");
       }
 
+      streamRef.current = stream;
       video.srcObject = stream;
+
       await video.play();
 
+      setFacingMode(mode);
       setPrediction(null);
       setCameraOn(true);
+      return true;
     } catch (err) {
       streamRef.current?.getTracks().forEach((track) => track.stop());
       streamRef.current = null;
 
+      if (videoRef.current) {
+        videoRef.current.srcObject = null;
+      }
+
+      setCameraOn(false);
       setError(
         err instanceof Error
           ? err.message
           : "Could not access camera. Check camera permissions."
       );
+
+      return false;
+    }
+  }
+
+  async function switchCamera() {
+    if (switchingCamera || loading) return;
+
+    const nextMode: CameraMode =
+      facingMode === "user" ? "environment" : "user";
+
+    setSwitchingCamera(true);
+
+    try {
+      const success = await startCamera(nextMode);
+
+      if (!success) {
+        // Keep the selected mode consistent with the active camera.
+        setFacingMode(nextMode === "user" ? "environment" : "user");
+      }
+    } finally {
+      setSwitchingCamera(false);
     }
   }
 
@@ -66,6 +103,8 @@ export default function Home() {
     }
 
     setCameraOn(false);
+    setPrediction(null);
+    setError("");
   }
 
   useEffect(() => {
@@ -95,7 +134,7 @@ export default function Home() {
         throw new Error("Could not process the camera image.");
       }
 
-      // Crop a square from the center of the webcam frame.
+      // Crop a square from the center of the camera frame.
       const size = Math.min(video.videoWidth, video.videoHeight);
       const sx = (video.videoWidth - size) / 2;
       const sy = (video.videoHeight - size) / 2;
@@ -132,7 +171,7 @@ export default function Home() {
       }
 
       // MNIST convention: black background, white digit.
-      // Invert a generally bright image, such as white paper.
+      // Invert bright images, such as dark writing on white paper.
       if (brightness / pixels.length > 127) {
         for (let i = 0; i < pixels.length; i++) {
           pixels[i] = 255 - pixels[i];
@@ -184,7 +223,7 @@ export default function Home() {
         <div className="mt-5 flex flex-wrap gap-3">
           {!cameraOn ? (
             <button
-              onClick={startCamera}
+              onClick={() => void startCamera()}
               className="rounded-xl bg-white px-5 py-3 font-semibold text-black transition hover:bg-zinc-200"
             >
               Start Camera
@@ -192,16 +231,28 @@ export default function Home() {
           ) : (
             <>
               <button
-                onClick={captureAndPredict}
-                disabled={loading}
+                onClick={() => void captureAndPredict()}
+                disabled={loading || switchingCamera}
                 className="rounded-xl bg-white px-5 py-3 font-semibold text-black transition hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {loading ? "Predicting..." : "Capture & Predict"}
               </button>
 
               <button
+                onClick={() => void switchCamera()}
+                disabled={switchingCamera || loading}
+                className="rounded-xl border border-zinc-700 px-5 py-3 transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {switchingCamera
+                  ? "Switching..."
+                  : facingMode === "user"
+                    ? "Switch to Back Camera"
+                    : "Switch to Front Camera"}
+              </button>
+
+              <button
                 onClick={stopCamera}
-                disabled={loading}
+                disabled={loading || switchingCamera}
                 className="rounded-xl border border-zinc-700 px-5 py-3 transition hover:bg-zinc-800 disabled:opacity-50"
               >
                 Stop Camera
@@ -222,7 +273,10 @@ export default function Home() {
         )}
 
         {error && (
-          <p role="alert" className="mt-4 break-words text-sm text-red-400">
+          <p
+            role="alert"
+            className="mt-4 break-words text-sm text-red-400"
+          >
             {error}
           </p>
         )}
